@@ -22,17 +22,7 @@ import ballerina/oauth2;
 
 public isolated function authenticateResource(http:ListenerAuthConfig[] authConfig, string header) returns
         http:Unauthorized|http:Forbidden|string? {
-    return tryAuthenticate(<http:ListenerAuthConfig[]>authConfig, header);
-}
-
-isolated function getServiceAuthConfig(http:Service serviceRef) returns http:ListenerAuthConfig[]? {
-    typedesc<any> serviceTypeDesc = typeof serviceRef;
-    var serviceAnnotation = serviceTypeDesc.@http:ServiceConfig;
-    if serviceAnnotation is () {
-        return;
-    }
-    http:HttpServiceConfig serviceConfig = <http:HttpServiceConfig>serviceAnnotation;
-    return serviceConfig?.auth;
+    return tryAuthenticate(authConfig, header);
 }
 
 isolated function getListenerAuthConfig(http:ListenerAuthConfig[] serviceAuthConfig, string[] toolScope)
@@ -47,13 +37,14 @@ isolated function getListenerAuthConfig(http:ListenerAuthConfig[] serviceAuthCon
     if authConfig is http:ListenerAuthConfig[] {
         return authConfig;
     }
-    return [];
+    return serviceAuthConfig;
 }
 
 isolated function tryAuthenticate(http:ListenerAuthConfig[] authConfig, string header) returns http:Unauthorized|http:Forbidden|string? {
     string scheme = extractScheme(header).trim();
-    http:Unauthorized|http:Forbidden|string? authResult = <http:Unauthorized>{};
+    http:Forbidden|http:Unauthorized err;
     foreach http:ListenerAuthConfig config in authConfig {
+        http:Unauthorized|http:Forbidden|string? authResult = <http:Unauthorized>{};
         if scheme is http:AUTH_SCHEME_BASIC {
             if config is http:FileUserStoreConfigWithScopes {
                 authResult = authenticateWithFileUserStore(config, header);
@@ -71,11 +62,12 @@ isolated function tryAuthenticate(http:ListenerAuthConfig[] authConfig, string h
                 log:printDebug("Invalid auth configurations for 'Bearer' scheme.");
             }
         }
-        if authResult is () || authResult is http:Forbidden {
+        if authResult is string || authResult is () {
             return authResult;
         }
+        err = authResult;
     }
-    return authResult;
+    return err;
 }
 
 // Extract the scheme from `string` header.
@@ -93,7 +85,7 @@ isolated function authenticateWithFileUserStore(http:FileUserStoreConfigWithScop
                                                 returns http:Unauthorized|http:Forbidden|string? {
     http:ListenerFileUserStoreBasicAuthHandler handler;
     lock {
-        string key = config.fileUserStoreConfig.toString();
+        string key = "fileStoreHandler";
         if authHandlers.hasKey(key) {
             handler = <http:ListenerFileUserStoreBasicAuthHandler>authHandlers.get(key);
         } else {
@@ -162,16 +154,21 @@ isolated function authenticateWithJwtValidatorConfig(http:JwtValidatorConfigWith
                 return authz;
             } 
         }
+    
         return authn?.sub;
     } else if authn is http:Unauthorized {
         return authn;
     } else {
-        panic error("Unsupported record type found.");
+        http:Unauthorized unauthorized = {
+            body: "Invalid JWT token"
+        };
+        return unauthorized;
     }
 }
 
-isolated function authenticateWithOAuth2IntrospectionConfig(http:OAuth2IntrospectionConfigWithScopes config, string header)
-                                                            returns http:Unauthorized|http:Forbidden|string? {
+isolated function authenticateWithOAuth2IntrospectionConfig(
+    http:OAuth2IntrospectionConfigWithScopes config, 
+    string header) returns http:Unauthorized|http:Forbidden|string? {
     http:ListenerOAuth2Handler handler;
     lock {
         string key = config.oauth2IntrospectionConfig.toString();
@@ -182,7 +179,8 @@ isolated function authenticateWithOAuth2IntrospectionConfig(http:OAuth2Introspec
             authHandlers[key] = handler;
         }
     }
-    oauth2:IntrospectionResponse|http:Unauthorized|http:Forbidden auth = handler->authorize(header, config?.scopes);
+    oauth2:IntrospectionResponse|http:Unauthorized|http:Forbidden auth = 
+            handler->authorize(header, config?.scopes);
     if auth is oauth2:IntrospectionResponse {
         return auth?.sub;
     } else if auth is http:Unauthorized || auth is http:Forbidden {

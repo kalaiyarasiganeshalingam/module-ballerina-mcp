@@ -23,6 +23,7 @@ isolated service class DispatcherService {
 }
 
 isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig) returns DispatcherService {
+    final readonly & http:ListenerAuthConfig[]? auth = httpServiceConfig.auth.cloneReadOnly();
     return @http:ServiceConfig {
         ...httpServiceConfig
     } isolated service object {
@@ -32,12 +33,11 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
         private ListToolsResult? listToolsRequest = ();
         private http:ListenerAuthConfig[]? authConfig = ();
 
+        isolated function init() {
+            self.authConfig = auth;
+        }
+
         isolated resource function delete .(http:Headers headers) returns http:BadRequest|http:Ok|Error {
-            lock {
-                if self.authConfig is () {
-                    self.authConfig = getServiceAuthConfig(self);
-                }
-            }
             ServiceConfiguration config = check self.getCachedServiceConfiguration();
             SessionMode sessionMode = config.sessionMode;
 
@@ -75,13 +75,10 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
         }
 
         isolated resource function post .(@http:Payload JsonRpcMessage request, http:Headers headers)
-                returns http:BadRequest|http:NotAcceptable|http:UnsupportedMediaType|http:Accepted|http:Ok|http:Unauthorized|http:Forbidden|Error {
-            http:NotAcceptable|http:UnsupportedMediaType? headerValidationError = validateRequiredHeaders(headers);
-            lock {
-                if self.authConfig is () {
-                    self.authConfig = getServiceAuthConfig(self);
-                }
-            }
+                returns http:BadRequest|http:NotAcceptable|http:UnsupportedMediaType|http:Accepted|
+                http:Ok|http:Unauthorized|http:Forbidden|Error {
+            http:NotAcceptable|http:UnsupportedMediaType? headerValidationError = 
+                        validateRequiredHeaders(headers);
             if headerValidationError !is () {
                 return headerValidationError;
             }
@@ -158,10 +155,12 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
             }
 
             ServiceConfiguration serviceConfig = check self.getCachedServiceConfiguration();
-            SessionMode effectiveSessionMode = determineEffectiveSessionMode(serviceConfig, headers, REQUEST_INITIALIZE);
+            SessionMode effectiveSessionMode = determineEffectiveSessionMode(serviceConfig, 
+                headers, REQUEST_INITIALIZE);
 
-            http:Unauthorized|http:Forbidden|string? authenticateResult = self.authenticate(headers);
-            if authenticateResult is http:Unauthorized || authenticateResult is http:Forbidden {
+            http:Unauthorized|http:Forbidden|string? authenticateResult = self.authenticate(headers, 
+                isCallInInit = true, isStateFul= effectiveSessionMode is STATEFUL);
+            if authenticateResult is http:Unauthorized|http:Forbidden {
                 return authenticateResult;
             }
             string userName = authenticateResult is string ? authenticateResult : "";
@@ -201,8 +200,9 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                 string newSessionId = uuid:createRandomUuid();
                 Session session = new (newSessionId);
                 self.sessionMap[newSessionId] = session;
-
-                log:printDebug("Connection initialization completed" , agentID= userName, sessionId = newSessionId);
+                if userName != "" {
+                    log:printDebug("Connection initialization completed" , agentID = userName);
+                }
 
                 return <http:Ok>{
                     headers: {[SESSION_ID_HEADER]: newSessionId},
@@ -218,7 +218,8 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
         private isolated function handleListToolsRequest(JsonRpcRequest request, http:Headers headers)
             returns http:BadRequest|http:Ok|Error {
             ServiceConfiguration serviceConfig = check self.getCachedServiceConfiguration();
-            SessionMode effectiveSessionMode = determineEffectiveSessionMode(serviceConfig, headers, REQUEST_LIST_TOOLS);
+            SessionMode effectiveSessionMode = determineEffectiveSessionMode(serviceConfig, 
+                headers, REQUEST_LIST_TOOLS);
 
             string? sessionId = ();
 
@@ -235,7 +236,7 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                     if !self.sessionMap.hasKey(sessionId) {
                         return <http:BadRequest>{
                             body: createJsonRpcError(INVALID_REQUEST,
-                                    string `Invalid session ID: ${sessionId}`, request.id)
+                                string `Invalid session ID: ${sessionId}`, request.id)
                         };
                     }
                 }
@@ -245,7 +246,7 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
             if listToolsResult is error {
                 return <http:BadRequest>{
                     body: createJsonRpcError(INTERNAL_ERROR,
-                            string `Failed to list tools: ${listToolsResult.message()}`, request.id)
+                        string `Failed to list tools: ${listToolsResult.message()}`, request.id)
                 };
             }
             lock {
@@ -287,20 +288,23 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                                 self.toolScopes.get(params.name)).cloneReadOnly();
                 }
             }
-            http:Unauthorized|http:Forbidden|string? authenticateResult = self.authenticate(headers, config = listenerAuthConfig);
-            if authenticateResult is http:Unauthorized || authenticateResult is http:Forbidden{
+            http:Unauthorized|http:Forbidden|string? authenticateResult = 
+                        self.authenticate(headers, config = listenerAuthConfig);
+            if authenticateResult is http:Unauthorized || authenticateResult is http:Forbidden {
                 return authenticateResult;
             }
             userName = authenticateResult is string ? authenticateResult : "";
             ServiceConfiguration serviceConfig = check self.getCachedServiceConfiguration();
-            SessionMode effectiveSessionMode = determineEffectiveSessionMode(serviceConfig, headers, REQUEST_CALL_TOOL);
+            SessionMode effectiveSessionMode = determineEffectiveSessionMode(serviceConfig, 
+                        headers, REQUEST_CALL_TOOL);
 
             string? sessionId = ();
 
             if effectiveSessionMode == STATEFUL {
                 sessionId = getSessionIdFromHeaders(headers);
                 if sessionId is () {
-                    log:printDebug("Tool execution failed" , agentID= userName, sessionId = sessionId, toolName = params.name);
+                    log:printDebug("Tool execution failed" , agentID= userName, 
+                        sessionId = sessionId, toolName = params.name);
                     return <http:BadRequest>{
                         body: createJsonRpcError(INVALID_REQUEST,
                                 "Missing session ID header", request.id)
@@ -309,7 +313,8 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
 
                 lock {
                     if !self.sessionMap.hasKey(sessionId) {
-                        log:printDebug("Tool execution failed" , agentID= userName, sessionId = sessionId, toolName = params.name);
+                        log:printDebug("Tool execution failed" , agentID= userName, 
+                            sessionId = sessionId, toolName = params.name);
                         return <http:BadRequest>{
                             body: createJsonRpcError(INVALID_REQUEST,
                                     string `Invalid session ID: ${sessionId}`, request.id)
@@ -325,10 +330,11 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
 
             CallToolResult|error callToolResult = self.executeOnCallTool(params, session);
             if callToolResult is error {
-                log:printDebug("Tool execution failed" , agentID= userName, sessionId = sessionId, toolName = params.name);
+                log:printDebug("Tool execution failed" , agentID= userName, sessionId = sessionId, 
+                    toolName = params.name);
                 return <http:BadRequest>{
                     body: createJsonRpcError(INTERNAL_ERROR,
-                            string `Failed to call tool '${params.name}': ${callToolResult.message()}`, request.id)
+                    string `Failed to call tool '${params.name}': ${callToolResult.message()}`, request.id)
                 };
             }
 
@@ -337,8 +343,9 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                 id: request.id,
                 result: callToolResult.cloneReadOnly()
             };
-
-            log:printInfo("Tool execution succeeded" , agentID = userName, sessionId = sessionId, toolName = params.name);
+            if userName != "" {
+                log:printInfo("Tool execution succeeded" , agentID = userName, toolName = params.name);
+            }
 
             return <http:Ok>{
                 headers: sessionId is string ? {[SESSION_ID_HEADER]: sessionId} : (),
@@ -373,7 +380,8 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                 return invokeOnCallTool(mcpService, params.cloneReadOnly(), session);
             }
             if mcpService is Service {
-                CallToolResult|error result = callToolForRemoteFunctions(mcpService, params.cloneReadOnly(), session);
+                CallToolResult|error result = callToolForRemoteFunctions(mcpService, 
+                    params.cloneReadOnly(), session);
                 if result is error {
                     return error DispatcherError(result.message());
                 }
@@ -383,22 +391,22 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
         }
 
         private isolated function getTools(RequestId requestId) returns http:BadRequest? {
-            ToolDefinition[] tools = [];
             lock {
+                ToolDefinition[] tools = [];
                 ListToolsResult? listToolsRequestResult = self.listToolsRequest;
                 if listToolsRequestResult is ListToolsResult {
-                    tools = listToolsRequestResult.tools.cloneReadOnly();
+                    tools = listToolsRequestResult.tools;
                 } else {
                     ListToolsResult|error listToolsResult = self.executeOnListTools();
                     if listToolsResult is error {
                         return <http:BadRequest>{
                             body: createJsonRpcError(INTERNAL_ERROR,
-                                    string `Failed to list tools: ${listToolsResult.message()}`, requestId)
+                                string `Failed to list tools: ${listToolsResult.message()}`, requestId)
                         };
                     }
-                    tools = listToolsResult.tools.cloneReadOnly();
+                    tools = listToolsResult.tools;
                 }
-                foreach ToolDefinition tool in tools.cloneReadOnly() {
+                foreach ToolDefinition tool in tools {
                     string|string[]? scopes = tool.scopes;
                     string[] scopesArray = [];
                     if scopes is string {
@@ -412,7 +420,8 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
             return; 
         }
 
-        private isolated function authenticate(http:Headers headers, http:ListenerAuthConfig[]? config = ()) 
+        private isolated function authenticate(http:Headers headers, 
+            http:ListenerAuthConfig[]? config = (), boolean isCallInInit = false, boolean isStateFul = false) 
                 returns http:Unauthorized|http:Forbidden|string? {
             http:ListenerAuthConfig[]? authConfig = ();
             lock {
@@ -426,6 +435,10 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
             }
             string|http:HeaderNotFoundError header = headers.getHeader(AUTHORIZATION);
             if header is http:HeaderNotFoundError {
+                if isCallInInit && isStateFul {
+                    log:printWarn("STATEFUL session mode is not supported with agent identity." + 
+                        " Use STATELESS or AUTO mode.");  
+                }
                 return <http:Unauthorized>{body :"Missing Authorization header"};
             }
             return authenticateResource(<http:ListenerAuthConfig[]>authConfig, header);
