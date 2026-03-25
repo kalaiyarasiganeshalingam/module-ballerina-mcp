@@ -17,7 +17,6 @@
 import ballerina/http;
 import ballerina/uuid;
 import ballerina/log;
-import ballerina/io;
 
 isolated service class DispatcherService {
     *http:Service;
@@ -38,6 +37,7 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
         }
 
         isolated resource function delete .(http:Headers headers) returns http:BadRequest|http:Ok|Error {
+            http:authenticateResource(self, "delete", []);
             ServiceConfiguration config = check self.getCachedServiceConfiguration();
             SessionMode sessionMode = config.sessionMode;
 
@@ -199,9 +199,6 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                 string newSessionId = uuid:createRandomUuid();
                 Session session = new (newSessionId);
                 self.sessionMap[newSessionId] = session;
-                if authenticateResult is string {
-                    log:printDebug("Connection initialization completed" , agentID = authenticateResult);
-                }
 
                 return <http:Ok>{
                     headers: {[SESSION_ID_HEADER]: newSessionId},
@@ -283,8 +280,6 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                     return toolsResult;
                 } else {
                     lock {
-                        io:println();
-                        io:println(self.toolScopes.clone());
                         toolScopes = self.toolScopes.clone();
                     }
                 }
@@ -293,7 +288,6 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                 listenerAuthConfig = getListenerAuthConfig(
                     authConfig, toolScopes.get(params.name));
             }
-            io:println(listenerAuthConfig);
             http:Unauthorized|http:Forbidden|string? authenticateResult =
                         self.authenticate(headers, config = listenerAuthConfig);
             if authenticateResult is http:Unauthorized || authenticateResult is http:Forbidden {
@@ -308,7 +302,7 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
             if effectiveSessionMode == STATEFUL {
                 sessionId = getSessionIdFromHeaders(headers);
                 if sessionId is () {
-                    log:printDebug("Tool execution failed" , agentID = authenticateResult.toString(),
+                    log:printDebug("Tool execution failed" , agentId = authenticateResult.toString(),
                         sessionId = sessionId, toolName = params.name);
                     return <http:BadRequest>{
                         body: createJsonRpcError(INVALID_REQUEST,
@@ -318,7 +312,7 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
 
                 lock {
                     if !self.sessionMap.hasKey(sessionId) {
-                        log:printDebug("Tool execution failed" , agentID = authenticateResult.toString(),
+                        log:printDebug("Tool execution failed" , agentId = authenticateResult.toString(),
                             sessionId = sessionId, toolName = params.name);
                         return <http:BadRequest>{
                             body: createJsonRpcError(INVALID_REQUEST,
@@ -335,7 +329,7 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
 
             CallToolResult|error callToolResult = self.executeOnCallTool(params, session);
             if callToolResult is error {
-                log:printDebug("Tool execution failed" , agentID = authenticateResult.toString(), sessionId = sessionId,
+                log:printDebug("Tool execution failed" , agentId = authenticateResult.toString(), sessionId = sessionId,
                     toolName = params.name);
                 return <http:BadRequest>{
                     body: createJsonRpcError(INTERNAL_ERROR,
@@ -349,7 +343,7 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                 result: callToolResult.cloneReadOnly()
             };
             if authenticateResult is string {
-                log:printInfo("Tool execution succeeded" , agentID = authenticateResult, toolName = params.name);
+                log:printInfo("Tool execution succeeded" , agentId = authenticateResult, toolName = params.name);
             }
 
             return <http:Ok>{
@@ -440,7 +434,6 @@ isolated function getDispatcherService(http:HttpServiceConfig httpServiceConfig)
                 }
                 return <http:Unauthorized>{body :"Missing Authorization header"};
             }
-            io:println(authConfig);
             return authenticateResource(<http:ListenerAuthConfig[]>authConfig, header);
         }
     };
